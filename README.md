@@ -46,7 +46,7 @@ WooCommerce and Plugin Check are vendored in `plugins/` and bind-mounted read-on
 | WooCommerce | 11.1.2 | `plugins/woocommerce` |
 | Plugin Check | 2.1.0 | `plugins/plugin-check` |
 
-Because the mounts are read-only, WordPress cannot update them in place. To change a version, replace the directory on the host and recreate the stack (`./ask.sh` → 5). Task 10 activates the vendored copies instead of downloading them.
+Because the mounts are writable, WordPress can update these in place. A wp.org update writes straight into `plugins/` and shows up as local modifications in `git status` — commit or discard them deliberately. Task 10 activates the vendored copies instead of downloading them.
 
 To drive the stack by hand instead:
 
