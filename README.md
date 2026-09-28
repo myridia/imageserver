@@ -27,7 +27,7 @@ The test stack is nginx-proxy, WordPress, MariaDB, phpMyAdmin, and an optional W
 ./ask.sh      # 1 foreground, 2 background, 3 status, 10 install WordPress + WooCommerce + plugin
 ```
 
-`ask.sh` tasks 1 and 2 add `www.app.local` and `phpmyadmin.app.local` to `/etc/hosts` and generate a self-signed wildcard certificate in `dockers/certs/` (gitignored) on first run. Accept the certificate warning once in your browser.
+`ask.sh` tasks 1 and 2 add `www.app.local` and `phpmyadmin.app.local` to `/etc/hosts` and install the shared `*.app.local` certificate into `dockers/certs/` (gitignored). That certificate is the one Tibellus and exobank use — issued by `minica root ca`, which your browser already trusts, so there is no certificate warning. If no trusted source is found, set `IMAGESERVER_CERT_SRC` to a directory holding it, otherwise a self-signed certificate is generated and the browser will warn.
 
 | Service | URL |
 |---------|-----|

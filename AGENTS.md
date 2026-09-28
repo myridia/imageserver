@@ -45,6 +45,8 @@ Gallery index comes from `array_search($attachment_id, get_gallery_image_ids())`
 ## Test stack
 `jwilder/nginx-proxy` terminates TLS and routes by `VIRTUAL_HOST`; WordPress and phpMyAdmin publish no container port of their own (phpMyAdmin also has a `127.0.0.1:8081` plain-http fallback for tunnels). Ports `80`/`443` are published by the proxy — override with `IMAGESERVER_HTTP_PORT` / `IMAGESERVER_HTTPS_PORT` if Tibellus already owns them, and note nginx-proxy's http→https redirect always targets `443`, so shift both together. The repo root is bind-mounted read-only into the plugin dir, so edits on the host are live in the container with no rebuild.
 
+**Do not set `VIRTUAL_PROTO` here.** It tells nginx-proxy the *upstream container* speaks TLS, so it emits `proxy_pass https://…:80` and every request 502s with `SSL_do_handshake() failed … wrong version number`. The proxy serves 443 for any vhost that has a matching cert, so TLS termination needs nothing on the service — leave `VIRTUAL_PROTO` unset and the upstream plain http, exactly as Tibellus does for phoenix.
+
 | Service | Container | Reach |
 |---------|-----------|-------|
 | nginx-proxy | imageserver_nginx_proxy | 80, 443 |
@@ -55,7 +57,9 @@ Gallery index comes from `array_search($attachment_id, get_gallery_image_ids())`
 
 `ask.sh` is the entry point: task 1 runs the stack in the foreground (logs stream, Ctrl+C stops), 2 starts it detached, 3 is status, 4/5 stop and restart, 6/7 shell into WordPress or MariaDB, 8/9 export and import the DB, 10 installs WordPress + WooCommerce + activates the plugin, 11 is a wp-cli passthrough, 12/13 remove containers with or without volumes. WordPress sees https correctly through the proxy because core's `wp_fix_server_vars()` honours `X-Forwarded-Proto`.
 
-DB credentials come from `WORDPRESS_DB_*` / `MARIADB_ROOT_PASSWORD` env vars, all defaulting to `imageserver` / `imageserver-root` — test-only values, never reuse them. `ask.sh` task 1 writes a self-signed `CN=*.app.local` cert into `dockers/certs/` (gitignored — never commit it); the browser will warn once. There is no unit test suite; verification is the stack plus manual checks in wp-admin and on a product page.
+DB credentials come from `WORDPRESS_DB_*` / `MARIADB_ROOT_PASSWORD` env vars, all defaulting to `imageserver` / `imageserver-root` — test-only values, never reuse them.
+
+Certificates: `ask.sh` copies the shared `*.app.local` cert (issuer `CN=minica root ca 5f23cb`, SHA-256 `2C:7C:DC:EC:88:…:3F:10`, valid to 2125) into `dockers/certs/_.app.local/`, searching `IMAGESERVER_CERT_SRC` then the Tibellus and Exobank copies. Do **not** generate a self-signed cert here — the minica root is in the browser's trust store, a self-signed leaf is not, and `curl` fails with `(60)`. jwilder reads certs at startup, so restart the proxy after any cert change. Note the same private key is committed in `tibellus` and `exobank`; it is gitignored here, which is the safer default but inconsistent with them.
 
 ## Conventions
 - Escape on output (`esc_url`, `esc_attr`, `esc_html`, `esc_url_raw`) and sanitize on input; never read `$_POST` directly.

@@ -52,6 +52,27 @@ stack_up() {
   docker ps --filter "name=${PREFIX}_" --filter "status=running" -q 2>/dev/null | grep -q .
 }
 
+install_trusted_cert() {
+  local src
+  for src in "${IMAGESERVER_CERT_SRC:-}" \
+    /home/veto/webs/gitlab/tibellus/dockers/certs/_.app.local \
+    /home/veto/webs/gitlab/exobank/dockers/certs/_.app.local; do
+    [ -n "$src" ] || continue
+    [ -f "$src/${HOST}.crt" ] || continue
+    mkdir -p "$CERT_DIR" || return 1
+    cp "$src/${HOST}.crt" "$CERT_DIR/${HOST}.crt" || return 1
+    cp "$src/${HOST}.key" "$CERT_DIR/${HOST}.key" || return 1
+    cp "$src/${HOST}.crt" "$CERT_DIR/${PMA_HOSTNAME}.crt" || return 1
+    cp "$src/${HOST}.key" "$CERT_DIR/${PMA_HOSTNAME}.key" || return 1
+    chmod 644 "$CERT_DIR"/*.crt
+    chmod 600 "$CERT_DIR"/*.key
+    echo "  installed the shared *.app.local cert from $src"
+    echo "  it is issued by 'minica root ca', which your browser already trusts"
+    return 0
+  done
+  return 1
+}
+
 setup_tls() {
   local names="127.0.0.1 ${HOST} ${PMA_HOSTNAME}"
   if grep -q "${HOST}" /etc/hosts 2>/dev/null && grep -q "${PMA_HOSTNAME}" /etc/hosts 2>/dev/null; then
@@ -67,9 +88,13 @@ setup_tls() {
 
   if [ -f "$CERT_DIR/${HOST}.crt" ] && [ -f "$CERT_DIR/${PMA_HOSTNAME}.crt" ]; then
     echo "  cert already present in dockers/certs/_.app.local"
+    echo "  issuer: $(openssl x509 -in "$CERT_DIR/${HOST}.crt" -noout -issuer 2>/dev/null | cut -d= -f2-)"
     return 0
   fi
+  install_trusted_cert && return 0
   mkdir -p "$CERT_DIR" || return 1
+  echo "  no trusted cert source found - generating a self-signed one"
+  echo "  (browsers and curl will reject it until you trust it or set IMAGESERVER_CERT_SRC)"
   echo "  generating self-signed wildcard cert for *.app.local ..."
   if ! openssl req -x509 -nodes -newkey rsa:2048 -days 825 \
     -subj "/CN=*.app.local" \
@@ -121,6 +146,13 @@ status_stack() {
   echo "  file: $CFG"
   echo "  url:  $URL"
   echo "  bind: http :${HTTP_PORT}  https :${HTTPS_PORT}  pma :${PMA_PORT} (127.0.0.1 only)"
+  echo ""
+  echo "== Host port holders =="
+  local port holders
+  for port in "$HTTP_PORT" "$HTTPS_PORT" "$PMA_PORT"; do
+    holders="$(docker ps --filter "publish=$port" --format '{{.Names}}' 2>/dev/null | tr '\n' ' ')"
+    printf '  :%-5s %s\n' "$port" "${holders:-free}"
+  done
   echo "  pma:  $PMA_URL (root / $DB_ROOT_PASS)"
   echo "        plain http: $PMA_PLAIN_URL"
   echo ""
