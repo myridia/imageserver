@@ -9,10 +9,14 @@ ask.sh                                    dev stack menu (TLS setup, start/stop,
 imageserver/imageserver.php              plugin header, constants, autoloader, bootstrap
 imageserver/src/Class/IS_Admin.php       settings page, option + sanitization, defaults
 imageserver/src/Class/IS_Frontend.php    WooCommerce filters, meta reading, URL building
+plugins/woocommerce/                     vendored WooCommerce 11.1.2, bind-mounted read-only
+plugins/plugin-check/                    vendored Plugin Check 2.1.0, bind-mounted read-only
 dockers/docker-compose.yml                nginx-proxy + WordPress + MariaDB + phpmyadmin + wpcli
 dockers/nginx/wordpress.conf              per-vhost snippet for nginx-proxy (64m body cap)
-dockers/certs/_.app.local/                self-signed *.app.local cert, generated, gitignored
+dockers/certs/_.app.local/                shared *.app.local cert, copied from tibellus, gitignored
 ```
+
+`plugins/` holds third-party plugins that are tracked in git on purpose, so the versions are pinned and the code can be edited host-side. All three are bind-mounted `:ro` into **both** the `wordpress` and `wpcli` services — the wpcli mount must match or `wp plugin list` / `activate` would act on a different copy than the site serves. Because the mounts are read-only, `wp plugin update` and `wp plugin install` cannot modify them; refresh a version by replacing the host directory. `ask.sh` task 10 therefore activates the vendored copies rather than installing from wordpress.org, and only falls back to a download if `plugins/<slug>` is missing.
 
 **Plugin mount is broken.** The plugin dir `imageserver/` is one level below the repo root, and the compose file mounts `../` (the repo root) as `wp-content/plugins/imageserver`. WordPress only detects a plugin whose main file sits at the root of its plugin dir, so it finds no plugin and `wp plugin activate imageserver` fails. Either point the mounts at `../imageserver` (one line each in the `wordpress` and `wpcli` services) or move the plugin to the repo root — the latter keeps the repo zip-installable as a plugin, the former keeps the files put. Ask before choosing.
 
@@ -55,7 +59,7 @@ Gallery index comes from `array_search($attachment_id, get_gallery_image_ids())`
 | phpmyadmin | imageserver_phpmyadmin | https://phpmyadmin.app.local, http://127.0.0.1:8081 |
 | wpcli | imageserver_wpcli | `profiles: [setup]`, never starts with the stack |
 
-`ask.sh` is the entry point: task 1 runs the stack in the foreground (logs stream, Ctrl+C stops), 2 starts it detached, 3 is status, 4/5 stop and restart, 6/7 shell into WordPress or MariaDB, 8/9 export and import the DB, 10 installs WordPress + WooCommerce + activates the plugin, 11 is a wp-cli passthrough, 12/13 remove containers with or without volumes. WordPress sees https correctly through the proxy because core's `wp_fix_server_vars()` honours `X-Forwarded-Proto`.
+`ask.sh` is the entry point: task 1 runs the stack in the foreground (logs stream, Ctrl+C stops), 2 starts it detached, 3 is status, 4/5 stop and restart, 6/7 shell into WordPress or MariaDB, 8/9 export and import the DB, 10 installs WordPress + WooCommerce + activates the plugin, 11/12 activate and deactivate the plugin, 13 lists all plugins, 14 is a wp-cli passthrough, 15/16 remove containers with or without volumes. WordPress sees https correctly through the proxy because core's `wp_fix_server_vars()` honours `X-Forwarded-Proto`.
 
 DB credentials come from `WORDPRESS_DB_*` / `MARIADB_ROOT_PASSWORD` env vars, all defaulting to `imageserver` / `imageserver-root` — test-only values, never reuse them.
 

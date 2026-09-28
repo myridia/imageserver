@@ -22,6 +22,8 @@ URL="https://${HOST}"
 PMA_URL="https://${PMA_HOSTNAME}"
 PMA_PLAIN_URL="http://127.0.0.1:${PMA_PORT}"
 CERT_DIR="$DIR/dockers/certs/_.app.local"
+PLUGIN_DIR="$DIR/imageserver"
+PLUGINS_DIR="$DIR/plugins"
 DB_NAME="${WORDPRESS_DB_NAME:-imageserver}"
 DB_USER="${WORDPRESS_DB_USER:-imageserver}"
 DB_PASS="${WORDPRESS_DB_PASSWORD:-imageserver}"
@@ -169,14 +171,13 @@ status_stack() {
   fi
   echo ""
   echo "== Plugin visibility =="
-  local first
-  first="$(compgen -G "$DIR/*.php" 2>/dev/null | head -1)"
-  if [ -n "$first" ]; then
-    echo "  ok - $(basename "$first") found at the plugin-dir root"
+  if [ -f "$PLUGIN_DIR/imageserver.php" ]; then
+    echo "  ok - imageserver.php present in $(basename "$PLUGIN_DIR")/ (the mount source)"
   else
-    echo "  WARNING: no .php file at $DIR"
-    echo "  The compose file mounts the repo root as wp-content/plugins/imageserver, and"
-    echo "  WordPress only detects a plugin whose main file sits at that root."
+    echo "  WARNING: no imageserver.php in $PLUGIN_DIR"
+    echo "  WordPress only detects a plugin whose main file sits at the root of its"
+    echo "  plugin dir. Compose must mount ../imageserver, not ../, into"
+    echo "  wp-content/plugins/imageserver."
   fi
 }
 
@@ -264,6 +265,19 @@ wpcli() {
   dc run --rm "$SVC_WPCLI" wp "$@"
 }
 
+ensure_plugin() {
+  local slug="$1" label="$2"
+  if [ -d "$PLUGINS_DIR/$slug" ]; then
+    echo "  $label is vendored in plugins/$slug (bind-mounted) - activating"
+  elif dc run --rm "$SVC_WPCLI" plugin is-installed "$slug" >/dev/null 2>&1; then
+    echo "  $label already installed in the volume - activating"
+  else
+    echo "  $label not vendored - installing from wordpress.org"
+    dc run --rm "$SVC_WPCLI" plugin install "$slug" || return 1
+  fi
+  dc run --rm "$SVC_WPCLI" plugin activate "$slug"
+}
+
 setup_site() {
   stack_up || { echo "Stack is not running - start it with task 1 (foreground) or 2 (background) first."; return 1; }
   echo "== WordPress core =="
@@ -279,17 +293,35 @@ setup_site() {
       --skip-email || return 1
   fi
   echo "== WooCommerce =="
-  if dc run --rm "$SVC_WPCLI" plugin is-installed woocommerce >/dev/null 2>&1; then
-    echo "  already installed"
-    dc run --rm "$SVC_WPCLI" plugin activate woocommerce
-  else
-    dc run --rm "$SVC_WPCLI" plugin install woocommerce --activate || return 1
-  fi
+  ensure_plugin woocommerce "WooCommerce" || return 1
+  echo "== Plugin Check =="
+  ensure_plugin plugin-check "Plugin Check" || return 1
   echo "== Image Server plugin =="
   dc run --rm "$SVC_WPCLI" plugin activate imageserver || return 1
   echo ""
   echo "Done. $URL  (login $WP_USER / $WP_PASS)"
   echo "Settings live under Settings -> Image Server."
+}
+
+activate_plugin() {
+  stack_up || { echo "Stack is not running - start it with task 1 (foreground) or 2 (background) first."; return 1; }
+  if ! wpcli plugin is-installed imageserver >/dev/null 2>&1; then
+    echo "Plugin files are not visible to WordPress."
+    echo "Check that dockers/docker-compose.yml mounts ../imageserver into"
+    echo "wp-content/plugins/imageserver, then recreate the stack (task 5)."
+    return 1
+  fi
+  wpcli plugin activate imageserver
+}
+
+deactivate_plugin() {
+  stack_up || { echo "Stack is not running - start it with task 1 (foreground) or 2 (background) first."; return 1; }
+  wpcli plugin deactivate imageserver
+}
+
+list_plugins() {
+  stack_up || { echo "Stack is not running - start it with task 1 (foreground) or 2 (background) first."; return 1; }
+  wpcli plugin list
 }
 
 remove_containers() {
@@ -318,9 +350,12 @@ while true; do
   echo "  8  Export DB - dump to dumps/"
   echo "  9  Import DB - drop + reload DB from a dump"
   echo " 10  Setup site - install WordPress, WooCommerce, activate plugin"
-  echo " 11  wp-cli - run a wp command, e.g. 11 plugin list"
-  echo " 12  Remove containers (keeps volumes)"
-  echo " 13  Remove containers AND volumes (destructive - wipes data)"
+  echo " 11  Activate plugin - imageserver"
+  echo " 12  Deactivate plugin - imageserver"
+  echo " 13  List plugins - name, status, version"
+  echo " 14  wp-cli - run a wp command, e.g. 14 option get imageserver_settings"
+  echo " 15  Remove containers (keeps volumes)"
+  echo " 16  Remove containers AND volumes (destructive - wipes data)"
   echo "  0  Exit"
   if ! read -rp "Task: " task; then
     break
@@ -336,9 +371,12 @@ while true; do
     8) export_db ;;
     9) import_db ;;
     10) setup_site ;;
-    11) read -rp "wp arguments: " -a wp_args; wpcli "${wp_args[@]}" ;;
-    12) remove_containers ;;
-    13) remove_all ;;
+    11) activate_plugin ;;
+    12) deactivate_plugin ;;
+    13) list_plugins ;;
+    14) read -rp "wp arguments: " -a wp_args; wpcli "${wp_args[@]}" ;;
+    15) remove_containers ;;
+    16) remove_all ;;
     0) break ;;
     *) echo "Unknown task" ;;
   esac

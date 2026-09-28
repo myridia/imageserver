@@ -37,6 +37,17 @@ The test stack is nginx-proxy, WordPress, MariaDB, phpMyAdmin, and an optional W
 
 The proxy binds host ports `80`/`443` by default. Override with `IMAGESERVER_HTTP_PORT` / `IMAGESERVER_HTTPS_PORT` if another stack already owns them — but note nginx-proxy's http-to-https redirect always targets port `443`, so shift both together and browse via the port directly.
 
+## Plugins
+
+WooCommerce and Plugin Check are vendored in `plugins/` and bind-mounted read-only into both the `wordpress` and `wpcli` services, so they are version-controlled with this repo and editable on the host. `imageserver/` is mounted the same way.
+
+| Plugin | Version | Source |
+|--------|---------|--------|
+| WooCommerce | 11.1.2 | `plugins/woocommerce` |
+| Plugin Check | 2.1.0 | `plugins/plugin-check` |
+
+Because the mounts are read-only, WordPress cannot update them in place. To change a version, replace the directory on the host and recreate the stack (`./ask.sh` → 5). Task 10 activates the vendored copies instead of downloading them.
+
 To drive the stack by hand instead:
 
 ```bash
