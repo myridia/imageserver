@@ -5,12 +5,16 @@ WordPress plugin (PHP 8.2, WordPress 6.7+) that rewrites WooCommerce product ima
 
 ## Layout
 ```
-imageserver/imageserver.php          plugin header, constants, autoloader, bootstrap
-imageserver/src/Class/IS_Admin.php   settings page, option + sanitization, defaults
-imageserver/src/Class/IS_Frontend.php WooCommerce filters, meta reading, URL building
-test/docker-compose.yml              nginx proxy + WordPress + MariaDB + wpcli (profile: setup)
-test/nginx/default.conf              reverse proxy to wordpress:80, 64m body cap
+ask.sh                                    dev stack menu (TLS setup, start/stop, DB, wp-cli)
+imageserver/imageserver.php              plugin header, constants, autoloader, bootstrap
+imageserver/src/Class/IS_Admin.php       settings page, option + sanitization, defaults
+imageserver/src/Class/IS_Frontend.php    WooCommerce filters, meta reading, URL building
+dockers/docker-compose.yml                nginx-proxy + WordPress + MariaDB + phpmyadmin + wpcli
+dockers/nginx/wordpress.conf              per-vhost snippet for nginx-proxy (64m body cap)
+dockers/certs/_.app.local/                self-signed *.app.local cert, generated, gitignored
 ```
+
+**Plugin mount is broken.** The plugin dir `imageserver/` is one level below the repo root, and the compose file mounts `../` (the repo root) as `wp-content/plugins/imageserver`. WordPress only detects a plugin whose main file sits at the root of its plugin dir, so it finds no plugin and `wp plugin activate imageserver` fails. Either point the mounts at `../imageserver` (one line each in the `wordpress` and `wpcli` services) or move the plugin to the repo root — the latter keeps the repo zip-installable as a plugin, the former keeps the files put. Ask before choosing.
 
 ## Autoloading — KNOWN BUG, plugin does not load
 `imageserver.php` maps `Salamander\Imageserver\X` → `IMAGESERVER_PLUGIN_DIR . 'src/' . 'X' . '.php'`, but the classes live in `src/Class/`. There is no `composer.json`, so nothing else provides the mapping. `is_readable()` therefore fails, neither class is ever loaded, and `imageserver_init()` fatals with "Class not found" on every request — including activation, since `register_activation_hook` references `IS_Admin::activate`. The fix is to add the missing `Class/` segment in the autoloader's `$file` (or move the classes to `src/`). Verify the plugin loads at all before debugging anything else.
@@ -39,19 +43,19 @@ Bails early when `is_admin() && !wp_doing_ajax()`, when WooCommerce is absent, o
 Gallery index comes from `array_search($attachment_id, get_gallery_image_ids())` and is 1-based (index 0 is the main image); an unknown id falls back to index 0.
 
 ## Test stack
-Only nginx is published, on `${IMAGESERVER_PORT:-8080}` (default `127.0.0.1:8080`). The repo root is bind-mounted read-only into the plugin dir, so edits on the host are live in the container with no rebuild.
+`jwilder/nginx-proxy` terminates TLS and routes by `VIRTUAL_HOST`; WordPress and phpMyAdmin publish no container port of their own (phpMyAdmin also has a `127.0.0.1:8081` plain-http fallback for tunnels). Ports `80`/`443` are published by the proxy — override with `IMAGESERVER_HTTP_PORT` / `IMAGESERVER_HTTPS_PORT` if Tibellus already owns them, and note nginx-proxy's http→https redirect always targets `443`, so shift both together. The repo root is bind-mounted read-only into the plugin dir, so edits on the host are live in the container with no rebuild.
 
-```bash
-docker compose -f test/docker-compose.yml up -d proxy wordpress db
-docker compose -f test/docker-compose.yml run --rm wpcli core install \
-  --url=http://127.0.0.1:8080 --title='Image Server Test' \
-  --admin_user=admin --admin_password=admin --admin_email=admin@example.com --skip-email
-docker compose -f test/docker-compose.yml run --rm wpcli plugin install woocommerce --activate
-docker compose -f test/docker-compose.yml run --rm wpcli plugin activate imageserver
-docker compose -f test/docker-compose.yml down
-```
+| Service | Container | Reach |
+|---------|-----------|-------|
+| nginx-proxy | imageserver_nginx_proxy | 80, 443 |
+| wordpress | imageserver_wordpress | https://www.app.local |
+| db | imageserver_db | internal only |
+| phpmyadmin | imageserver_phpmyadmin | https://phpmyadmin.app.local, http://127.0.0.1:8081 |
+| wpcli | imageserver_wpcli | `profiles: [setup]`, never starts with the stack |
 
-`wpcli` is behind `profiles: [setup]` so it never starts with the main stack. DB credentials come from `WORDPRESS_DB_*` / `MARIADB_ROOT_PASSWORD` env vars, all defaulting to `imageserver` / `imageserver-root` — test-only values, never reuse them. There is no unit test suite; verification is the stack plus manual checks in wp-admin and on a product page.
+`ask.sh` is the entry point: task 1 runs the stack in the foreground (logs stream, Ctrl+C stops), 2 starts it detached, 3 is status, 4/5 stop and restart, 6/7 shell into WordPress or MariaDB, 8/9 export and import the DB, 10 installs WordPress + WooCommerce + activates the plugin, 11 is a wp-cli passthrough, 12/13 remove containers with or without volumes. WordPress sees https correctly through the proxy because core's `wp_fix_server_vars()` honours `X-Forwarded-Proto`.
+
+DB credentials come from `WORDPRESS_DB_*` / `MARIADB_ROOT_PASSWORD` env vars, all defaulting to `imageserver` / `imageserver-root` — test-only values, never reuse them. `ask.sh` task 1 writes a self-signed `CN=*.app.local` cert into `dockers/certs/` (gitignored — never commit it); the browser will warn once. There is no unit test suite; verification is the stack plus manual checks in wp-admin and on a product page.
 
 ## Conventions
 - Escape on output (`esc_url`, `esc_attr`, `esc_html`, `esc_url_raw`) and sanitize on input; never read `$_POST` directly.
@@ -60,9 +64,10 @@ docker compose -f test/docker-compose.yml down
 - No comments in code unless asked.
 - Do not run git-modifying commands or commit; the user commits.
 - Do not commit credentials or real customer/image data.
-- `.gitignore` is the WordPress template: safe to add real WP files to a checkout, but never commit `wp-config.php` or `wp-content/uploads/`.
+- `.gitignore` is the WordPress site template plus `/dumps/` and `/dockers/certs/`. Never commit `wp-config.php`, `wp-content/uploads/`, or the TLS keys.
 
 ## Verify
 - `php -l imageserver/imageserver.php imageserver/src/Class/*.php` — note the agent container has no PHP, so ask the user to run it if unavailable.
-- `docker compose -f test/docker-compose.yml config` to validate the stack.
+- `bash -n ask.sh && shellcheck ask.sh`.
+- `docker compose -f dockers/docker-compose.yml config` to validate the stack (the agent container has no compose v2 plugin, so the user runs it).
 - Manual: activate the plugin (this is where the autoloader bug surfaces), then check a product page, a category listing, cart, and a WooCommerce email for rewritten URLs.

@@ -21,28 +21,34 @@ The `{path}` placeholder is replaced with the product image path. The `{size}` p
 
 ## Test stack
 
-The test stack contains one Nginx proxy, WordPress, MariaDB, and an optional WP-CLI helper. Only Nginx is exposed to the host.
+The test stack is nginx-proxy, WordPress, MariaDB, phpMyAdmin, and an optional WP-CLI helper. Browser traffic goes through the TLS-terminating reverse proxy; only the proxy is exposed on the host.
 
 ```bash
-docker compose -f test/docker-compose.yml up -d proxy wordpress db
+./ask.sh      # 1 foreground, 2 background, 3 status, 10 install WordPress + WooCommerce + plugin
 ```
 
-After WordPress is available at `http://127.0.0.1:8080`, initialize it and install WooCommerce:
+`ask.sh` tasks 1 and 2 add `www.app.local` and `phpmyadmin.app.local` to `/etc/hosts` and generate a self-signed wildcard certificate in `dockers/certs/` (gitignored) on first run. Accept the certificate warning once in your browser.
+
+| Service | URL |
+|---------|-----|
+| WordPress | https://www.app.local |
+| phpMyAdmin | https://phpmyadmin.app.local (root / `imageserver-root`) |
+| phpMyAdmin (plain http fallback) | http://127.0.0.1:8081 |
+
+The proxy binds host ports `80`/`443` by default. Override with `IMAGESERVER_HTTP_PORT` / `IMAGESERVER_HTTPS_PORT` if another stack already owns them — but note nginx-proxy's http-to-https redirect always targets port `443`, so shift both together and browse via the port directly.
+
+To drive the stack by hand instead:
 
 ```bash
-docker compose -f test/docker-compose.yml run --rm wpcli core install \
-  --url=http://127.0.0.1:8080 \
+docker compose -f dockers/docker-compose.yml up -d nginx-proxy wordpress db phpmyadmin
+docker compose -f dockers/docker-compose.yml run --rm wpcli core install \
+  --url=https://www.app.local \
   --title='Image Server Test' \
   --admin_user=admin \
   --admin_password=admin \
   --admin_email=admin@example.com \
   --skip-email
-docker compose -f test/docker-compose.yml run --rm wpcli plugin install woocommerce --activate
-docker compose -f test/docker-compose.yml run --rm wpcli plugin activate imageserver
-```
-
-Stop the stack with:
-
-```bash
-docker compose -f test/docker-compose.yml down
+docker compose -f dockers/docker-compose.yml run --rm wpcli plugin install woocommerce --activate
+docker compose -f dockers/docker-compose.yml run --rm wpcli plugin activate imageserver
+docker compose -f dockers/docker-compose.yml down
 ```

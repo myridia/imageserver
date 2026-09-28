@@ -49,3 +49,6 @@ wp-config.php
 
 # ask.sh database dumps
 /dumps/
+
+# self-signed TLS certs and private keys (ask.sh task 1 generates these)
+/dockers/certs/

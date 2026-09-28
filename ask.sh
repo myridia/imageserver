@@ -5,15 +5,23 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CFG="$DIR/dockers/docker-compose.yml"
 
 PREFIX="imageserver"
-SVC_PROXY="proxy"
+SVC_PROXY="nginx-proxy"
 SVC_APP="wordpress"
 SVC_DB="db"
 SVC_WPCLI="wpcli"
+SVC_PMA="phpmyadmin"
 APP="${PREFIX}_${SVC_APP}"
 DB="${PREFIX}_${SVC_DB}"
 
-PORT="${IMAGESERVER_PORT:-8080}"
-URL="http://127.0.0.1:${PORT}"
+HTTP_PORT="${IMAGESERVER_HTTP_PORT:-80}"
+HTTPS_PORT="${IMAGESERVER_HTTPS_PORT:-443}"
+PMA_PORT="${IMAGESERVER_PMA_PORT:-8081}"
+HOST="www.app.local"
+PMA_HOSTNAME="phpmyadmin.app.local"
+URL="https://${HOST}"
+PMA_URL="https://${PMA_HOSTNAME}"
+PMA_PLAIN_URL="http://127.0.0.1:${PMA_PORT}"
+CERT_DIR="$DIR/dockers/certs/_.app.local"
 DB_NAME="${WORDPRESS_DB_NAME:-imageserver}"
 DB_USER="${WORDPRESS_DB_USER:-imageserver}"
 DB_PASS="${WORDPRESS_DB_PASSWORD:-imageserver}"
@@ -44,12 +52,65 @@ stack_up() {
   docker ps --filter "name=${PREFIX}_" --filter "status=running" -q 2>/dev/null | grep -q .
 }
 
-start_stack() {
-  echo "Starting proxy, WordPress and MariaDB ..."
-  dc up -d "$SVC_PROXY" "$SVC_APP" "$SVC_DB"
+setup_tls() {
+  local names="127.0.0.1 ${HOST} ${PMA_HOSTNAME}"
+  if grep -q "${HOST}" /etc/hosts 2>/dev/null && grep -q "${PMA_HOSTNAME}" /etc/hosts 2>/dev/null; then
+    echo "  /etc/hosts already resolves ${HOST} and ${PMA_HOSTNAME}"
+  elif printf '%s\n' "$names" | sudo tee -a /etc/hosts >/dev/null 2>&1; then
+    echo "  appended '${names}' to /etc/hosts"
+  elif printf '%s\n' "$names" >>/etc/hosts 2>/dev/null; then
+    echo "  appended '${names}' to /etc/hosts"
+  else
+    echo "  WARNING: cannot edit /etc/hosts - add this line yourself:"
+    echo "           ${names}"
+  fi
+
+  if [ -f "$CERT_DIR/${HOST}.crt" ] && [ -f "$CERT_DIR/${PMA_HOSTNAME}.crt" ]; then
+    echo "  cert already present in dockers/certs/_.app.local"
+    return 0
+  fi
+  mkdir -p "$CERT_DIR" || return 1
+  echo "  generating self-signed wildcard cert for *.app.local ..."
+  if ! openssl req -x509 -nodes -newkey rsa:2048 -days 825 \
+    -subj "/CN=*.app.local" \
+    -addext "subjectAltName=DNS:*.app.local" \
+    -keyout "$CERT_DIR/app.local.key" -out "$CERT_DIR/app.local.crt" 2>/dev/null; then
+    echo "  WARNING: openssl failed (needs 1.1.1+ for -addext) - generate the cert yourself"
+    return 1
+  fi
+  local host
+  for host in "$HOST" "$PMA_HOSTNAME"; do
+    cp "$CERT_DIR/app.local.crt" "$CERT_DIR/${host}.crt"
+    cp "$CERT_DIR/app.local.key" "$CERT_DIR/${host}.key"
+  done
+  chmod 644 "$CERT_DIR"/*.crt
+  chmod 600 "$CERT_DIR"/*.key
+  echo "  cert written to dockers/certs/_.app.local (gitignored)"
+  echo "  your browser will warn once - accept the certificate for both names"
+}
+
+start_foreground() {
+  echo "Configuring TLS hosts and cert ..."
+  setup_tls
   echo ""
-  echo "WordPress: $URL"
-  echo "If it is not installed yet, run task 9."
+  echo "Starting in the foreground - logs stream here, Ctrl+C stops the stack ..."
+  echo ""
+  dc up
+  echo ""
+  echo "Stack stopped. Restart it with task 2 when you are ready."
+}
+
+start_background() {
+  echo "Configuring TLS hosts and cert ..."
+  setup_tls
+  echo ""
+  echo "Starting nginx-proxy, WordPress, MariaDB and phpMyAdmin in the background ..."
+  dc up -d "$SVC_PROXY" "$SVC_APP" "$SVC_DB" "$SVC_PMA"
+  echo ""
+  echo "WordPress:  $URL"
+  echo "phpMyAdmin: $PMA_URL (root / $DB_ROOT_PASS)"
+  echo "            plain http fallback: $PMA_PLAIN_URL"
+  echo "If WordPress is not installed yet, run task 10."
 }
 
 status_stack() {
@@ -59,6 +120,21 @@ status_stack() {
   echo "== Compose config =="
   echo "  file: $CFG"
   echo "  url:  $URL"
+  echo "  bind: http :${HTTP_PORT}  https :${HTTPS_PORT}  pma :${PMA_PORT} (127.0.0.1 only)"
+  echo "  pma:  $PMA_URL (root / $DB_ROOT_PASS)"
+  echo "        plain http: $PMA_PLAIN_URL"
+  echo ""
+  echo "== TLS =="
+  if [ -f "$CERT_DIR/${HOST}.crt" ] && [ -f "$CERT_DIR/${PMA_HOSTNAME}.crt" ]; then
+    echo "  cert ok - $(openssl x509 -in "$CERT_DIR/${HOST}.crt" -noout -enddate 2>/dev/null)"
+  else
+    echo "  no cert yet - run task 1 to generate one"
+  fi
+  if grep -q "${PMA_HOSTNAME}" /etc/hosts 2>/dev/null; then
+    echo "  hosts ok - $(grep "${PMA_HOSTNAME}" /etc/hosts | head -1)"
+  else
+    echo "  WARNING: ${PMA_HOSTNAME} missing from /etc/hosts - run task 1"
+  fi
   echo ""
   echo "== Plugin visibility =="
   local first
@@ -80,18 +156,18 @@ stop_stack() {
 
 restart_stack() {
   dc stop
-  dc up -d "$SVC_PROXY" "$SVC_APP" "$SVC_DB"
-  echo "Restarted. WordPress: $URL"
+  dc up -d "$SVC_PROXY" "$SVC_APP" "$SVC_DB" "$SVC_PMA"
+  echo "Restarted. WordPress: $URL  phpMyAdmin: $PMA_URL"
 }
 
 enter_app() {
-  stack_up || { echo "Stack is not running - start it with task 1 first."; return 1; }
+  stack_up || { echo "Stack is not running - start it with task 1 (foreground) or 2 (background) first."; return 1; }
   echo "Entering $APP ('exit' leaves) ..."
   docker exec -it "$APP" bash
 }
 
 enter_db() {
-  stack_up || { echo "Stack is not running - start it with task 1 first."; return 1; }
+  stack_up || { echo "Stack is not running - start it with task 1 (foreground) or 2 (background) first."; return 1; }
   echo "Entering $DB as root ('exit' leaves) ..."
   docker exec -it "$DB" mariadb -u root -p"$DB_ROOT_PASS"
 }
@@ -101,7 +177,7 @@ db_root() {
 }
 
 export_db() {
-  stack_up || { echo "Stack is not running - start it with task 1 first."; return 1; }
+  stack_up || { echo "Stack is not running - start it with task 1 (foreground) or 2 (background) first."; return 1; }
   mkdir -p "$DUMP_DIR" || return 1
   local stamp out
   stamp="$(date +%Y%m%d-%H%M%S)"
@@ -122,10 +198,10 @@ list_dumps() {
 
 import_db() {
   local file dumps
-  [ -d "$DUMP_DIR" ] || { echo "No dumps in $DUMP_DIR - export one with task 7 first."; return 1; }
+  [ -d "$DUMP_DIR" ] || { echo "No dumps in $DUMP_DIR - export one with task 8 first."; return 1; }
   dumps="$(list_dumps)"
   if [ -z "$dumps" ]; then
-    echo "No dumps in $DUMP_DIR - export one with task 7 first."
+    echo "No dumps in $DUMP_DIR - export one with task 8 first."
     return 1
   fi
   echo "Available dumps (newest first):"
@@ -152,12 +228,12 @@ import_db() {
 }
 
 wpcli() {
-  stack_up || { echo "Stack is not running - start it with task 1 first."; return 1; }
+  stack_up || { echo "Stack is not running - start it with task 1 (foreground) or 2 (background) first."; return 1; }
   dc run --rm "$SVC_WPCLI" wp "$@"
 }
 
 setup_site() {
-  stack_up || { echo "Stack is not running - start it with task 1 first."; return 1; }
+  stack_up || { echo "Stack is not running - start it with task 1 (foreground) or 2 (background) first."; return 1; }
   echo "== WordPress core =="
   if dc run --rm "$SVC_WPCLI" core is-installed >/dev/null 2>&1; then
     echo "  already installed - skipping"
@@ -194,41 +270,43 @@ remove_all() {
   echo "This removes the containers AND the database volumes - all local data is lost."
   confirm "Really remove containers and volumes?" || return 1
   dc down -v
-  echo "Done. WordPress must be reinstalled with task 9."
+  echo "Done. WordPress must be reinstalled with task 10."
 }
 
 while true; do
   echo ""
-  echo "imageserver - $URL"
-  echo "  1  Run - start the stack"
-  echo "  2  Status - containers, url, plugin visibility"
-  echo "  3  Stop - stop the stack (containers stay)"
-  echo "  4  Restart - restart the stack"
-  echo "  5  Enter WordPress container"
-  echo "  6  Enter DB (mariadb, root)"
-  echo "  7  Export DB - dump to dumps/"
-  echo "  8  Import DB - drop + reload DB from a dump"
-  echo "  9  Setup site - install WordPress, WooCommerce, activate plugin"
-  echo "  10 Remove containers (keeps volumes)"
-  echo "  11 Remove containers AND volumes (destructive - wipes data)"
-  echo "  12 wp-cli - run a wp command, e.g. 12 plugin list"
+  echo "imageserver - $URL   (phpMyAdmin $PMA_URL)"
+  echo "  1  Run (foreground) - start the stack and stream logs, Ctrl+C stops it"
+  echo "  2  Run (background) - start the stack detached"
+  echo "  3  Status - containers, url, TLS, plugin visibility"
+  echo "  4  Stop - stop the stack (containers stay)"
+  echo "  5  Restart - restart the stack"
+  echo "  6  Enter WordPress container"
+  echo "  7  Enter DB (mariadb, root)"
+  echo "  8  Export DB - dump to dumps/"
+  echo "  9  Import DB - drop + reload DB from a dump"
+  echo " 10  Setup site - install WordPress, WooCommerce, activate plugin"
+  echo " 11  wp-cli - run a wp command, e.g. 11 plugin list"
+  echo " 12  Remove containers (keeps volumes)"
+  echo " 13  Remove containers AND volumes (destructive - wipes data)"
   echo "  0  Exit"
   if ! read -rp "Task: " task; then
     break
   fi
   case "$task" in
-    1) start_stack ;;
-    2) status_stack ;;
-    3) stop_stack ;;
-    4) restart_stack ;;
-    5) enter_app ;;
-    6) enter_db ;;
-    7) export_db ;;
-    8) import_db ;;
-    9) setup_site ;;
-    10) remove_containers ;;
-    11) remove_all ;;
-    12) read -rp "wp arguments: " -a wp_args; wpcli "${wp_args[@]}" ;;
+    1) start_foreground ;;
+    2) start_background ;;
+    3) status_stack ;;
+    4) stop_stack ;;
+    5) restart_stack ;;
+    6) enter_app ;;
+    7) enter_db ;;
+    8) export_db ;;
+    9) import_db ;;
+    10) setup_site ;;
+    11) read -rp "wp arguments: " -a wp_args; wpcli "${wp_args[@]}" ;;
+    12) remove_containers ;;
+    13) remove_all ;;
     0) break ;;
     *) echo "Unknown task" ;;
   esac
