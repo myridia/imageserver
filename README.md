@@ -1,3 +1,4 @@
+<img src="imageserver.svg" alt="imageserver" width="120">
 # Image Server
 
 WordPress plugin to use an image server instead of WooCommerce media-library images for product output.
