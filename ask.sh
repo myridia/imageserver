@@ -12,6 +12,10 @@ SVC_WPCLI="wpcli"
 SVC_PMA="phpmyadmin"
 APP="${PREFIX}_${SVC_APP}"
 DB="${PREFIX}_${SVC_DB}"
+C_PROXY="${PREFIX}_nginx_proxy"
+C_APP="${PREFIX}_wordpress"
+C_DB="${PREFIX}_db"
+C_PMA="${PREFIX}_phpmyadmin"
 
 HTTP_PORT="${IMAGESERVER_HTTP_PORT:-80}"
 HTTPS_PORT="${IMAGESERVER_HTTPS_PORT:-443}"
@@ -22,8 +26,11 @@ URL="https://${HOST}"
 PMA_URL="https://${PMA_HOSTNAME}"
 PMA_PLAIN_URL="http://127.0.0.1:${PMA_PORT}"
 CERT_DIR="$DIR/dockers/certs/_.app.local"
-PLUGIN_DIR="$DIR/imageserver"
 PLUGINS_DIR="$DIR/plugins"
+PLUGIN_DIR="$PLUGINS_DIR/imageserver"
+PLUGIN_REL="plugins/imageserver"
+MOUNT_SRC="$DIR/imageserver"
+MOUNT_REL="imageserver"
 DB_NAME="${WORDPRESS_DB_NAME:-imageserver}"
 DB_USER="${WORDPRESS_DB_USER:-imageserver}"
 DB_PASS="${WORDPRESS_DB_PASSWORD:-imageserver}"
@@ -141,43 +148,127 @@ start_background() {
 }
 
 status_stack() {
-  echo "== Containers =="
-  docker ps -a --filter "name=${PREFIX}_" --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}'
+  local table line cname state status svc
+  local running=0 unhealthy=0 notcreated=0 stopped=0 details=""
+  local site_state site_line code rc hint
+
+  table="$(docker ps -a --filter "name=${PREFIX}_" --format '{{.Names}}|{{.State}}|{{.Status}}' 2>/dev/null)"
+
+  for svc in "$SVC_PROXY" "$SVC_APP" "$SVC_DB" "$SVC_PMA"; do
+    case "$svc" in
+      "$SVC_PROXY") cname="$C_PROXY" ;;
+      "$SVC_APP") cname="$C_APP" ;;
+      "$SVC_DB") cname="$C_DB" ;;
+      "$SVC_PMA") cname="$C_PMA" ;;
+    esac
+    line="$(printf '%s\n' "$table" | grep "^${cname}|" | head -1)"
+    if [ -z "$line" ]; then
+      notcreated=$((notcreated + 1))
+      details="${details}  FAIL ${cname} not created - run task 2"$'\n'
+      continue
+    fi
+    state="${line#*|}"
+    state="${state%%|*}"
+    status="${line#*|}"
+    status="${status#*|}"
+    if [ "$state" = running ]; then
+      running=$((running + 1))
+      case "$status" in
+        *unhealthy*|*starting*)
+          unhealthy=$((unhealthy + 1))
+          details="${details}  warn ${cname} ${status}"$'\n'
+          ;;
+        *)
+          details="${details}  ok   ${cname} ${status}"$'\n'
+          ;;
+      esac
+    else
+      stopped=$((stopped + 1))
+      details="${details}  FAIL ${cname} ${status}"$'\n'
+    fi
+  done
+
+  code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "$URL" 2>/dev/null)"
+  rc=$?
+  hint=""
+  case "$rc" in
+    0) ;;
+    6) hint=" - ${HOST} is not in /etc/hosts, run task 1" ;;
+    7) hint=" - nothing is listening on ${HTTPS_PORT}" ;;
+    28) hint=" - no answer within 5s" ;;
+    60) hint=" - the certificate is not trusted, see the TLS section" ;;
+    127) hint=" - curl is not installed" ;;
+  esac
+  if [ "$rc" -ne 0 ]; then
+    site_state=warn
+    site_line="warn ${URL} not checked${hint}"
+  else
+    case "$code" in
+      2*|3*) site_state=ok; site_line="ok   ${URL} returned ${code}" ;;
+      *) site_state=fail; site_line="FAIL ${URL} returned ${code}" ;;
+    esac
+  fi
+
+  echo "== Stack =="
+  if [ "$notcreated" -gt 0 ] || [ "$stopped" -gt 0 ]; then
+    echo "  FAIL not up - $running/4 running, $stopped stopped, $notcreated never created"
+    echo "       start it with task 2 (background) or task 1 (foreground)"
+  elif [ "$unhealthy" -gt 0 ]; then
+    echo "  warn up - $running/4 running, $unhealthy not ready yet or failing its healthcheck"
+  elif [ "$site_state" = fail ]; then
+    echo "  warn containers are up but the site does not answer"
+  elif [ "$site_state" = warn ]; then
+    echo "  warn containers are up but ${URL} could not be checked"
+  else
+    echo "  ok   up - $running/4 running and the site answers"
+  fi
+
   echo ""
-  echo "== Compose config =="
-  echo "  file: $CFG"
-  echo "  url:  $URL"
-  echo "  bind: http :${HTTP_PORT}  https :${HTTPS_PORT}  pma :${PMA_PORT} (127.0.0.1 only)"
+  echo "== Services =="
+  printf '%s' "$details"
+  printf '  %s\n' "$site_line"
+
   echo ""
-  echo "== Host port holders =="
+  echo "== Host ports =="
   local port holders
   for port in "$HTTP_PORT" "$HTTPS_PORT" "$PMA_PORT"; do
     holders="$(docker ps --filter "publish=$port" --format '{{.Names}}' 2>/dev/null | tr '\n' ' ')"
-    printf '  :%-5s %s\n' "$port" "${holders:-free}"
+    if [ -z "$holders" ]; then
+      printf '  %-4s :%-5s free - no container publishes it\n' "warn" "$port"
+    elif printf '%s' "$holders" | grep -q "$C_PROXY"; then
+      printf '  %-4s :%-5s %s\n' "ok" "$port" "$holders"
+    else
+      printf '  %-4s :%-5s %s - held by another stack\n' "warn" "$port" "$holders"
+    fi
   done
   echo "  pma:  $PMA_URL (root / $DB_ROOT_PASS)"
   echo "        plain http: $PMA_PLAIN_URL"
+
   echo ""
   echo "== TLS =="
   if [ -f "$CERT_DIR/${HOST}.crt" ] && [ -f "$CERT_DIR/${PMA_HOSTNAME}.crt" ]; then
-    echo "  cert ok - $(openssl x509 -in "$CERT_DIR/${HOST}.crt" -noout -enddate 2>/dev/null)"
+    echo "  ok   expires $(openssl x509 -in "$CERT_DIR/${HOST}.crt" -noout -enddate 2>/dev/null | cut -d= -f2-)"
   else
-    echo "  no cert yet - run task 1 to generate one"
+    echo "  FAIL no cert yet - run task 1 to generate one"
   fi
   if grep -q "${PMA_HOSTNAME}" /etc/hosts 2>/dev/null; then
-    echo "  hosts ok - $(grep "${PMA_HOSTNAME}" /etc/hosts | head -1)"
+    echo "  ok   hosts ok - $(grep "${PMA_HOSTNAME}" /etc/hosts | head -1)"
   else
-    echo "  WARNING: ${PMA_HOSTNAME} missing from /etc/hosts - run task 1"
+    echo "  FAIL ${PMA_HOSTNAME} missing from /etc/hosts - run task 1"
   fi
+
   echo ""
-  echo "== Plugin visibility =="
+  echo "== Plugin =="
   if [ -f "$PLUGIN_DIR/imageserver.php" ]; then
-    echo "  ok - imageserver.php present in $(basename "$PLUGIN_DIR")/ (the mount source)"
+    echo "  ok   source ${PLUGIN_REL}/imageserver.php"
   else
-    echo "  WARNING: no imageserver.php in $PLUGIN_DIR"
-    echo "  WordPress only detects a plugin whose main file sits at the root of its"
-    echo "  plugin dir. Compose must mount ../imageserver, not ../, into"
-    echo "  wp-content/plugins/imageserver."
+    echo "  FAIL no imageserver.php in ${PLUGIN_REL} - the plugin source is missing"
+  fi
+  if [ "$MOUNT_SRC" = "$PLUGIN_DIR" ]; then
+    echo "  ok   compose mounts ${PLUGIN_REL} into wp-content/plugins/imageserver"
+  else
+    echo "  FAIL compose mounts ${MOUNT_REL} into wp-content/plugins/imageserver,"
+    echo "       which is not ${PLUGIN_REL} - WordPress finds no plugin there"
   fi
 }
 
@@ -342,7 +433,7 @@ while true; do
   echo "imageserver - $URL   (phpMyAdmin $PMA_URL)"
   echo "  1  Run (foreground) - start the stack and stream logs, Ctrl+C stops it"
   echo "  2  Run (background) - start the stack detached"
-  echo "  3  Status - containers, url, TLS, plugin visibility"
+  echo "  3  Status - up/ok verdict, services, site, ports, TLS, plugin"
   echo "  4  Stop - stop the stack (containers stay)"
   echo "  5  Restart - restart the stack"
   echo "  6  Enter WordPress container"
