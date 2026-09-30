@@ -37,7 +37,7 @@ DB_USER="${WORDPRESS_DB_USER:-imageserver}"
 DB_PASS="${WORDPRESS_DB_PASSWORD:-imageserver}"
 DB_ROOT_PASS="${MARIADB_ROOT_PASSWORD:-imageserver-root}"
 
-DUMP_DIR="$DIR/dumps"
+INIT_DIR="$DIR/dockers/init"
 WP_TITLE="Image Server Test"
 WP_USER="admin"
 WP_PASS="admin"
@@ -303,30 +303,32 @@ db_root() {
 
 export_db() {
   stack_up || { echo "Stack is not running - start it with task 1 (foreground) or 2 (background) first."; return 1; }
-  mkdir -p "$DUMP_DIR" || return 1
-  local stamp out
-  stamp="$(date +%Y%m%d-%H%M%S)"
-  out="$DUMP_DIR/${PREFIX}-${stamp}.sql.gz"
+  mkdir -p "$INIT_DIR" || return 1
+  local out
+  out="$INIT_DIR/${DB_NAME}.sql.gz"
   echo "Dumping $DB_NAME ..."
   if docker exec "$DB" sh -c 'command -v mariadb-dump >/dev/null && echo yes' | grep -q yes; then
-    docker exec "$DB" mariadb-dump -u"$DB_USER" -p"$DB_PASS" --single-transaction "$DB_NAME" | gzip > "$out"
+    docker exec "$DB" mariadb-dump -u"$DB_USER" -p"$DB_PASS" --single-transaction --databases "$DB_NAME" | gzip > "$out"
   else
-    docker exec "$DB" mysqldump -u"$DB_USER" -p"$DB_PASS" --single-transaction "$DB_NAME" | gzip > "$out"
+    docker exec "$DB" mysqldump -u"$DB_USER" -p"$DB_PASS" --single-transaction --databases "$DB_NAME" | gzip > "$out"
   fi
   [ -s "$out" ] || { echo "Dump failed or empty: $out"; return 1; }
   echo "Wrote $out ($(du -h "$out" | cut -f1))"
+  echo "  A fresh stack loads this on its own: compose mounts dockers/init as"
+  echo "  /docker-entrypoint-initdb.d, so 'down -v' and then task 2 restore it."
+  echo "  That only happens on an empty data volume - an existing db_data is left alone."
+  echo "  Task 9 imports a dump from the same directory."
 }
 
 list_dumps() {
-  find "$DUMP_DIR" -maxdepth 1 -type f -name '*.sql.gz' -printf '%T@ %p\n' 2>/dev/null | sort -rn | cut -d' ' -f2-
+  find "$INIT_DIR" -maxdepth 1 -type f -name '*.sql.gz' -printf '%T@ %p\n' 2>/dev/null | sort -rn | cut -d' ' -f2-
 }
 
 import_db() {
   local file dumps
-  [ -d "$DUMP_DIR" ] || { echo "No dumps in $DUMP_DIR - export one with task 8 first."; return 1; }
   dumps="$(list_dumps)"
   if [ -z "$dumps" ]; then
-    echo "No dumps in $DUMP_DIR - export one with task 8 first."
+    echo "No dumps in $INIT_DIR - export one with task 8 first."
     return 1
   fi
   echo "Available dumps (newest first):"
@@ -334,7 +336,7 @@ import_db() {
     printf '  %s  %s\n' "$(du -h "$file" | cut -f1)" "$(basename "$file")"
   done <<< "$dumps"
   read -rp "Dump to import (name): " file
-  file="$DUMP_DIR/$(basename "$file")"
+  file="$INIT_DIR/$(basename "$file")"
   [ -f "$file" ] || { echo "No such dump: $file"; return 1; }
   echo "This DROPS and recreates '$DB_NAME' on $DB, wiping all current data."
   confirm "Continue?" || return 1
@@ -343,11 +345,15 @@ import_db() {
   echo "Recreating $DB_NAME ..."
   db_root -e "DROP DATABASE IF EXISTS \`$DB_NAME\`; CREATE DATABASE \`$DB_NAME\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;" || return 1
   echo "Restoring $(basename "$file") ..."
-  gunzip -c "$file" | docker exec -i "$DB" mariadb -u"$DB_USER" -p"$DB_PASS" "$DB_NAME" || {
+  if gunzip -c "$file" | docker exec -i "$DB" mariadb -u"$DB_USER" -p"$DB_PASS" "$DB_NAME" 2>/dev/null; then
+    :
+  elif gunzip -c "$file" | docker exec -i "$DB" mariadb -u"$DB_USER" -p"$DB_PASS" 2>/dev/null; then
+    echo "  (the dump selected its own database)"
+  else
     echo "Restore failed - the database is currently empty."
     dc up -d "$SVC_APP"
     return 1
-  }
+  fi
   dc up -d "$SVC_APP"
   echo "Imported. WordPress: $URL"
 }
@@ -439,8 +445,8 @@ while true; do
   echo "  5  Restart - restart the stack"
   echo "  6  Enter WordPress container"
   echo "  7  Enter DB (mariadb, root)"
-  echo "  8  Export DB - dump to dumps/"
-  echo "  9  Import DB - drop + reload DB from a dump"
+  echo "  8  Export DB - dump to dockers/init (a fresh stack loads it)"
+  echo "  9  Import DB - drop + reload DB from a dump in dockers/init"
   echo " 10  Setup site - install WordPress, WooCommerce, activate plugin"
   echo " 11  Activate plugin - imageserver"
   echo " 12  Deactivate plugin - imageserver"
