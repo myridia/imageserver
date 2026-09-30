@@ -19,33 +19,25 @@ class IS_Frontend
         }
 
         add_filter('woocommerce_single_product_image_thumbnail_html', [$this, 'single_product_image'], 10, 2);
-        add_filter('woocommerce_gallery_thumbnail_html', [$this, 'gallery_thumbnail'], 10, 2);
-        add_filter('woocommerce_catalog_product_thumbnail', [$this, 'catalog_thumbnail'], 10, 4);
+        add_filter('woocommerce_product_get_image', [$this, 'product_image'], 10, 3);
         add_filter('woocommerce_cart_item_thumbnail', [$this, 'cart_item_thumbnail'], 10, 3);
-        add_filter('woocommerce_email_order_item_thumbnail', [$this, 'email_order_item_thumbnail'], 10, 3);
-        add_filter('woocommerce_variation_image_html', [$this, 'variation_image'], 10, 3);
+        add_filter('woocommerce_order_item_thumbnail', [$this, 'email_order_item_thumbnail'], 10, 2);
     }
 
     public function single_product_image($html, $attachment_id)
     {
         $product = $this->current_product();
-
-        return $this->rewrite_html($html, $this->product_image_url($product, 'woocommerce_single'));
-    }
-
-    public function gallery_thumbnail($html, $attachment_id)
-    {
-        $product = $this->current_product();
         $index = $this->gallery_index($product, $attachment_id);
+        $size = $index > 0 ? 'woocommerce_gallery_thumbnail' : 'woocommerce_single';
 
-        return $this->rewrite_html($html, $this->product_image_url($product, 'woocommerce_gallery_thumbnail', $index));
+        return $this->rewrite_html($html, $this->product_image_url($product, $size, $index));
     }
 
-    public function catalog_thumbnail($html, $thumbnail_url, $product_id, $product = null)
+    public function product_image($html, $product, $size = 'woocommerce_thumbnail')
     {
-        $product = $this->resolve_product($product, $product_id);
+        $is_variation = is_object($product) && method_exists($product, 'get_type') && $product->get_type() === 'variation';
 
-        return $this->rewrite_html($html, $this->product_image_url($product, 'woocommerce_thumbnail'));
+        return $this->rewrite_html($html, $this->product_image_url($product, $is_variation ? 'woocommerce_single' : $size));
     }
 
     public function cart_item_thumbnail($html, $cart_item_key, $cart_item)
@@ -55,18 +47,11 @@ class IS_Frontend
         return $this->rewrite_html($html, $this->product_image_url($product, 'woocommerce_thumbnail'));
     }
 
-    public function email_order_item_thumbnail($html, $attachment_id, $image_url)
+    public function email_order_item_thumbnail($html, $item)
     {
-        $product = $this->current_product();
+        $product = is_object($item) && method_exists($item, 'get_product') ? $item->get_product() : null;
 
         return $this->rewrite_html($html, $this->product_image_url($product, 'woocommerce_thumbnail'));
-    }
-
-    public function variation_image($html, $attachment_id, $variation_id = null)
-    {
-        $product = $this->resolve_product($this->current_product(), $variation_id);
-
-        return $this->rewrite_html($html, $this->product_image_url($product, 'woocommerce_single'));
     }
 
     private function enabled()
@@ -93,27 +78,6 @@ class IS_Frontend
         }
 
         return null;
-    }
-
-    private function resolve_product($product, $product_id = null)
-    {
-        if (is_object($product) && method_exists($product, 'get_meta')) {
-            return $product;
-        }
-
-        if (is_object($product_id) && method_exists($product_id, 'get_meta')) {
-            return $product_id;
-        }
-
-        if (is_numeric($product_id) && function_exists('wc_get_product')) {
-            return wc_get_product((int) $product_id);
-        }
-
-        if (is_numeric($product) && function_exists('wc_get_product')) {
-            return wc_get_product((int) $product);
-        }
-
-        return $this->current_product();
     }
 
     private function product_paths($product)
@@ -208,13 +172,41 @@ class IS_Frontend
         $source = untrailingslashit($settings['source']);
         $path = ltrim($path, '/');
         $encoded_path = implode('/', array_map('rawurlencode', explode('/', $path)));
+        $dimensions = $this->size_dimensions($size);
         $pattern = $size ? $settings['resize_pattern'] : $settings['original_pattern'];
         $pattern = strtr($pattern, [
             '{path}' => $encoded_path,
             '{size}' => rawurlencode((string) $size),
+            '{width}' => rawurlencode((string) $dimensions[0]),
+            '{height}' => rawurlencode((string) $dimensions[1]),
         ]);
 
         return esc_url_raw($source . $pattern);
+    }
+
+    private function size_dimensions($size)
+    {
+        $width = 0;
+        $height = 0;
+
+        if (function_exists('wc_get_image_size') && is_string($size) && $size !== '') {
+            $registered = wc_get_image_size($size);
+
+            if (is_array($registered)) {
+                $width = isset($registered['width']) ? (int) $registered['width'] : 0;
+                $height = isset($registered['height']) ? (int) $registered['height'] : 0;
+            }
+        }
+
+        if ($width <= 0) {
+            $width = is_numeric($size) ? (int) $size : 0;
+        }
+
+        if ($height <= 0) {
+            $height = $width;
+        }
+
+        return [$width, $height];
     }
 
     private function rewrite_html($html, $url)

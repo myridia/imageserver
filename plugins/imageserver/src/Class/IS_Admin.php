@@ -54,7 +54,7 @@ class IS_Admin
         $this->add_field('enabled', 'Enable image rewriting', 'enabled', 'Rewrites WooCommerce front-end image output when enabled.');
         $this->add_field('source', 'Image server source', 'source', 'The base URL of the image server.', 'url');
         $this->add_field('original_pattern', 'Original image pattern', 'original_pattern', 'Use {path} for the source image path.');
-        $this->add_field('resize_pattern', 'Resized image pattern', 'resize_pattern', 'Use {path} and {size} for rendered image paths.');
+        $this->add_field('resize_pattern', 'Resized image pattern', 'resize_pattern', 'Use {path}, {width} and {height} for rendered image paths. WooCommerce image sizes are resolved to pixel dimensions.');
     }
 
     public function render_settings_page()
