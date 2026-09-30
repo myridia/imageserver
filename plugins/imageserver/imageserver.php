@@ -40,6 +40,9 @@ function imageserver_init()
     $admin = new Salamander\Imageserver\IS_Admin();
     $admin->register();
 
+    $meta = new Salamander\Imageserver\IS_Product_Meta();
+    $meta->register();
+
     $frontend = new Salamander\Imageserver\IS_Frontend();
     $frontend->register();
 }
