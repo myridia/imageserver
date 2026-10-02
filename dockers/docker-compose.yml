@@ -1,0 +1,101 @@
+services:
+  nginx-proxy:
+    container_name: imageserver_nginx_proxy
+    image: jwilder/nginx-proxy
+    ports:
+      - "${IMAGESERVER_HTTP_PORT:-80}:80"
+      - "${IMAGESERVER_HTTPS_PORT:-443}:443"
+    volumes:
+      - /var/run/docker.sock:/tmp/docker.sock:ro
+      - ./certs/_.app.local:/etc/nginx/certs
+      - ./nginx/wordpress.conf:/etc/nginx/vhost.d/wordpress.conf:ro
+    networks:
+      - imageserver
+
+  wordpress:
+    image: wordpress:7.1-apache
+    container_name: imageserver_wordpress
+    environment:
+      WORDPRESS_DB_HOST: db
+      WORDPRESS_DB_USER: ${WORDPRESS_DB_USER:-imageserver}
+      WORDPRESS_DB_PASSWORD: ${WORDPRESS_DB_PASSWORD:-imageserver}
+      WORDPRESS_DB_NAME: ${WORDPRESS_DB_NAME:-imageserver}
+      VIRTUAL_HOST: www.app.local
+      VIRTUAL_PORT: 80
+    volumes:
+      - wordpress_data:/var/www/html
+      - ../plugins/imageserver:/var/www/html/wp-content/plugins/imageserver
+      - ../plugins/woocommerce:/var/www/html/wp-content/plugins/woocommerce
+      - ../plugins/plugin-check:/var/www/html/wp-content/plugins/plugin-check
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - imageserver
+
+  db:
+    image: mariadb:11.4
+    container_name: imageserver_db
+    environment:
+      MARIADB_DATABASE: ${WORDPRESS_DB_NAME:-imageserver}
+      MARIADB_USER: ${WORDPRESS_DB_USER:-imageserver}
+      MARIADB_PASSWORD: ${WORDPRESS_DB_PASSWORD:-imageserver}
+      MARIADB_ROOT_PASSWORD: ${MARIADB_ROOT_PASSWORD:-imageserver-root}
+    volumes:
+      - db_data:/var/lib/mysql
+      - ./init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    networks:
+      - imageserver
+
+  phpmyadmin:
+    image: phpmyadmin:5
+    container_name: imageserver_phpmyadmin
+    ports:
+      - "127.0.0.1:${IMAGESERVER_PMA_PORT:-8081}:80"
+    environment:
+      PMA_HOST: db
+      PMA_PORT: "3306"
+      PMA_USER: root
+      PMA_PASSWORD: ${MARIADB_ROOT_PASSWORD:-imageserver-root}
+      VIRTUAL_HOST: phpmyadmin.app.local
+      VIRTUAL_PORT: 80
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - imageserver
+
+  wpcli:
+    image: wordpress:cli
+    container_name: imageserver_wpcli
+    profiles:
+      - setup
+    user: "33:33"
+    working_dir: /var/www/html
+    environment:
+      WORDPRESS_DB_HOST: db
+      WORDPRESS_DB_USER: ${WORDPRESS_DB_USER:-imageserver}
+      WORDPRESS_DB_PASSWORD: ${WORDPRESS_DB_PASSWORD:-imageserver}
+      WORDPRESS_DB_NAME: ${WORDPRESS_DB_NAME:-imageserver}
+    volumes:
+      - wordpress_data:/var/www/html
+      - ../plugins/imageserver:/var/www/html/wp-content/plugins/imageserver
+      - ../plugins/woocommerce:/var/www/html/wp-content/plugins/woocommerce
+      - ../plugins/plugin-check:/var/www/html/wp-content/plugins/plugin-check
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - imageserver
+
+networks:
+  imageserver:
+
+volumes:
+  wordpress_data:
+  db_data:
